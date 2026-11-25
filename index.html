@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="theme-color" content="#14141f">
+<title>Voice Studio</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<h1>Voice Studio</h1>
+<p class="hint">Use earbuds so playback stays out of the mic.</p>
+
+<div id="tracks"></div>
+
+<div class="panel">
+  <label>Sync offset: <span id="offsetLabel">0</span> ms
+    <input type="range" id="offset" min="0" max="400" value="0">
+  </label>
+  <button id="playAll">Play all</button>
+  <button id="stopAll">Stop</button>
+  <button id="mixBtn" class="primary">Mix and download</button>
+  <a id="download" style="display:none">Download mix</a>
+</div>
+
+<p id="status"></p>
+<script src="app.js"></script>
+</body>
+</html>
