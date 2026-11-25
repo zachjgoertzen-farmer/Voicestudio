@@ -1,14 +1,37 @@
 const NAMES = ['Lead', 'Tenor', 'Voice 3', 'Voice 4'];
 const ctx = new (window.AudioContext || window.webkitAudioContext)();
 const tracks = NAMES.map(() => ({ buffer: null, gain: 1, muted: false, nudge: 0 }));
-let playing = [];
+
+// One permanent volume control per track, so volume and mute work live
+const trackGain = NAMES.map(() => {
+  const g = ctx.createGain();
+  g.connect(ctx.destination);
+  return g;
+});
+
+let sources = [];
 let recorder = null;
 let stream = null;
-let previewTimer = null;
+let isRecording = false;
 let lastMixSaved = true;
+
+// Playback position tracking
+let playing = false;
+let startedAt = 0;   // audio clock time when playback started
+let startedPos = 0;  // song position (seconds) at that moment
+let pausedPos = 0;   // where we are when paused
+let seeking = false;
+let restartTimer = null;
+let lastRestart = 0;
+let pendingPos = null;
+
 const statusEl = document.getElementById('status');
 const micSelect = document.getElementById('micSelect');
 const outSelect = document.getElementById('outSelect');
+const seek = document.getElementById('seek');
+const curTime = document.getElementById('curTime');
+const durTime = document.getElementById('durTime');
+const playPauseBtn = document.getElementById('playPause');
 
 function say(t) { statusEl.textContent = t; }
 
@@ -32,9 +55,8 @@ async function loadDevices() {
   });
   if (prevMic) micSelect.value = prevMic;
 
-  // Output choice only works in browsers that support it (Chrome on Android does)
   const prevOut = outSelect.value;
-  outSelect.innerHTML = '<option value="default">Default (earbuds if connected)</option>';
+  outSelect.innerHTML = `<option value='default'>Default (earbuds if connected)</option>`;
   devices.filter(d => d.kind === 'audiooutput').forEach((d, n) => {
     const o = document.createElement('option');
     o.value = d.deviceId;
@@ -57,6 +79,22 @@ async function applyOutput() {
 }
 outSelect.onchange = applyOutput;
 
+// ---------- Volume and mute (live) ----------
+function applyGain(i) {
+  const t = tracks[i];
+  trackGain[i].gain.setTargetAtTime(t.muted ? 0 : t.gain, ctx.currentTime, 0.01);
+}
+
+// ---------- Timing nudge (live) ----------
+function setNudge(i, ms) {
+  ms = Math.max(-2000, Math.min(2000, Math.round(ms)));
+  tracks[i].nudge = ms;
+  document.getElementById('nudge' + i).value = ms;
+  document.getElementById('nudgeLabel' + i).textContent = ms;
+  lastMixSaved = false;
+  scheduleRestart();
+}
+
 // ---------- Build the track UI ----------
 const container = document.getElementById('tracks');
 NAMES.forEach((name, i) => {
@@ -64,45 +102,44 @@ NAMES.forEach((name, i) => {
   div.className = 'track';
   div.innerHTML = `
     <h3>${name}</h3>
-    <button class="rec" id="rec${i}">Record</button>
-    <button id="mute${i}">Mute</button>
+    <button class='rec' id='rec${i}'>Record</button>
+    <button id='mute${i}'>Mute</button>
     <label>Volume
-      <input type="range" id="vol${i}" min="0" max="150" value="100">
+      <input type='range' id='vol${i}' min='0' max='150' value='100'>
     </label>
-    <label>Timing nudge: <span id="nudgeLabel${i}">0</span> ms
-      <input type="range" id="nudge${i}" min="-300" max="300" value="0">
+    <label>Timing nudge: <span id='nudgeLabel${i}'>0</span> ms <small>(left = earlier, right = later)</small>
+      <input type='range' id='nudge${i}' min='-2000' max='2000' step='1' value='0'>
     </label>
-    <button id="nudgeMinus${i}">- 5 ms</button>
-    <button id="nudgePlus${i}">+ 5 ms</button>
-    <button id="nudgeZero${i}">Reset</button>`;
+    <div class='nudgerow'>
+      <button class='nb' data-ms='-10'>-10</button>
+      <button class='nb' data-ms='-1'>-1</button>
+      <button class='nb' data-ms='1'>+1</button>
+      <button class='nb' data-ms='10'>+10</button>
+      <button class='nb' data-ms='reset'>Reset</button>
+    </div>`;
   container.appendChild(div);
+
   document.getElementById('rec' + i).onclick = () => toggleRecord(i);
+
   document.getElementById('mute' + i).onclick = (e) => {
     tracks[i].muted = !tracks[i].muted;
     e.target.textContent = tracks[i].muted ? 'Unmute' : 'Mute';
-  };
-  document.getElementById('vol' + i).oninput = (e) => {
-    tracks[i].gain = e.target.value / 100;
+    e.target.classList.toggle('on', tracks[i].muted);
+    applyGain(i);
   };
 
-  // Per-track timing nudge. Negative = play earlier, positive = play later.
-  const slider = document.getElementById('nudge' + i);
-  const label = document.getElementById('nudgeLabel' + i);
-  function setNudge(ms) {
-    ms = Math.max(-300, Math.min(300, ms));
-    tracks[i].nudge = ms;
-    slider.value = ms;
-    label.textContent = ms;
-    lastMixSaved = false;
-    clearTimeout(previewTimer);
-    previewTimer = setTimeout(() => {
-      if (!recorder || recorder.state !== 'recording') startPlayback(tracks.length);
-    }, 400);
-  }
-  slider.oninput = (e) => setNudge(Number(e.target.value));
-  document.getElementById('nudgeMinus' + i).onclick = () => setNudge(tracks[i].nudge - 5);
-  document.getElementById('nudgePlus' + i).onclick = () => setNudge(tracks[i].nudge + 5);
-  document.getElementById('nudgeZero' + i).onclick = () => setNudge(0);
+  document.getElementById('vol' + i).oninput = (e) => {
+    tracks[i].gain = e.target.value / 100;
+    applyGain(i);
+  };
+
+  document.getElementById('nudge' + i).oninput = (e) => setNudge(i, Number(e.target.value));
+  div.querySelectorAll('.nb').forEach(b => {
+    b.onclick = () => {
+      if (b.dataset.ms === 'reset') setNudge(i, 0);
+      else setNudge(i, tracks[i].nudge + Number(b.dataset.ms));
+    };
+  });
 });
 
 const offsetInput = document.getElementById('offset');
@@ -110,33 +147,146 @@ offsetInput.oninput = () => {
   document.getElementById('offsetLabel').textContent = offsetInput.value;
 };
 
-// ---------- Playback ----------
-function startPlayback(upTo) {
-  stopPlayback();
-  const when = ctx.currentTime + 0.15;
-  for (let i = 0; i < upTo; i++) {
-    const t = tracks[i];
-    if (!t.buffer || t.muted) continue;
-    const src = ctx.createBufferSource();
-    src.buffer = t.buffer;
-    const g = ctx.createGain();
-    g.gain.value = t.gain;
-    src.connect(g).connect(ctx.destination);
-    const shift = t.nudge / 1000;
-    if (shift >= 0) {
-      src.start(when + shift);
-    } else {
-      src.start(when, Math.min(-shift, t.buffer.duration - 0.001));
-    }
-    playing.push(src);
-  }
-  return when;
+// ---------- Playback engine ----------
+function totalDuration() {
+  let d = 0;
+  tracks.forEach(t => {
+    if (t.buffer) d = Math.max(d, t.nudge / 1000 + t.buffer.duration);
+  });
+  return d;
 }
 
-function stopPlayback() {
-  playing.forEach(s => { try { s.stop(); } catch (e) {} });
-  playing = [];
+function currentPos() {
+  if (!playing) return pausedPos;
+  return Math.max(startedPos, startedPos + (ctx.currentTime - startedAt));
 }
+
+function fmt(s) {
+  s = Math.max(0, s);
+  const m = Math.floor(s / 60);
+  const r = s - m * 60;
+  return m + ':' + r.toFixed(1).padStart(4, '0');
+}
+
+function stopSources() {
+  sources.forEach(s => { try { s.stop(); } catch (e) {} });
+  sources = [];
+}
+
+// Start playing from a spot in the song. Each track begins where its nudge says.
+function playFrom(pos, upTo) {
+  stopSources();
+  const when = ctx.currentTime + 0.05;
+  for (let i = 0; i < upTo; i++) {
+    const t = tracks[i];
+    if (!t.buffer) continue;
+    const into = pos - t.nudge / 1000;   // how far into this recording we should be
+    let delay = 0;
+    let offset = into;
+    if (into < 0) { delay = -into; offset = 0; }
+    if (offset >= t.buffer.duration) continue;
+    const src = ctx.createBufferSource();
+    src.buffer = t.buffer;
+    src.connect(trackGain[i]);
+    src.start(when + delay, offset);
+    sources.push(src);
+  }
+  playing = true;
+  startedAt = when;
+  startedPos = pos;
+  playPauseBtn.textContent = 'Pause';
+}
+
+function pausePlayback() {
+  if (playing) pausedPos = currentPos();
+  stopSources();
+  playing = false;
+  playPauseBtn.textContent = 'Play';
+}
+
+// Restart playback from the same spot (or a new one) so changes are heard right away.
+// Limited to a few restarts per second so dragging a slider stays smooth.
+function scheduleRestart(pos) {
+  if (!playing || isRecording) return;
+  pendingPos = (pos === undefined) ? null : pos;
+  clearTimeout(restartTimer);
+  const wait = Math.max(0, 120 - (performance.now() - lastRestart));
+  restartTimer = setTimeout(() => {
+    lastRestart = performance.now();
+    if (!playing || isRecording) return;
+    playFrom(pendingPos === null ? currentPos() : pendingPos, tracks.length);
+  }, wait);
+}
+
+// ---------- Seek bar ----------
+function updateSeekUI(pos) {
+  const dur = totalDuration();
+  durTime.textContent = fmt(dur);
+  curTime.textContent = fmt(pos);
+  if (!seeking) {
+    seek.value = dur > 0 ? Math.min(1000, Math.round(pos / dur * 1000)) : 0;
+  }
+}
+
+function tick() {
+  const dur = totalDuration();
+  let pos = currentPos();
+  if (playing && !isRecording && dur > 0 && pos >= dur) {
+    pausePlayback();
+    pausedPos = 0;
+    pos = 0;
+  }
+  updateSeekUI(pos);
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+function startSeek() { seeking = true; }
+function endSeek() { setTimeout(() => { seeking = false; }, 100); }
+seek.addEventListener('pointerdown', startSeek);
+seek.addEventListener('touchstart', startSeek, { passive: true });
+seek.addEventListener('pointerup', endSeek);
+seek.addEventListener('pointercancel', endSeek);
+seek.addEventListener('touchend', endSeek);
+
+seek.addEventListener('input', () => {
+  if (isRecording) return;
+  const pos = totalDuration() * seek.value / 1000;
+  curTime.textContent = fmt(pos);
+  if (playing) scheduleRestart(pos);
+  else pausedPos = pos;
+});
+
+seek.addEventListener('change', () => {
+  if (isRecording) return;
+  const pos = totalDuration() * seek.value / 1000;
+  clearTimeout(restartTimer);
+  if (playing) {
+    lastRestart = performance.now();
+    playFrom(pos, tracks.length);
+  } else {
+    pausedPos = pos;
+  }
+});
+
+// ---------- Play, pause, stop ----------
+playPauseBtn.onclick = async () => {
+  if (isRecording) return;
+  await ctx.resume();
+  await applyOutput();
+  if (playing) { pausePlayback(); return; }
+  if (!tracks.some(t => t.buffer)) { say('Record something first.'); return; }
+  let pos = pausedPos;
+  if (pos >= totalDuration()) pos = 0;
+  playFrom(pos, tracks.length);
+};
+
+document.getElementById('stopAll').onclick = () => {
+  if (isRecording) return;
+  pausePlayback();
+  pausedPos = 0;
+  updateSeekUI(0);
+};
 
 // ---------- Recording ----------
 async function toggleRecord(i) {
@@ -155,51 +305,57 @@ async function toggleRecord(i) {
     say('Could not open that microphone. Try another one from the list.');
     return;
   }
+  pausePlayback();
+  isRecording = true;
   const chunks = [];
   recorder = new MediaRecorder(stream);
   recorder.ondataavailable = (e) => chunks.push(e.data);
   recorder.onstop = async () => {
-    stopPlayback();
+    isRecording = false;
+    pausePlayback();
     stream.getTracks().forEach(t => t.stop());
-    const blob = new Blob(chunks);
-    const arr = await blob.arrayBuffer();
-    let buf = await ctx.decodeAudioData(arr);
-    // Trim the sync offset off the start to line up with earlier tracks
-    const trim = Number(offsetInput.value) / 1000;
-    if (trim > 0 && trim < buf.duration) {
-      const start = Math.floor(trim * buf.sampleRate);
-      const out = ctx.createBuffer(buf.numberOfChannels, buf.length - start, buf.sampleRate);
-      for (let c = 0; c < buf.numberOfChannels; c++) {
-        out.copyToChannel(buf.getChannelData(c).subarray(start), c);
+    try {
+      const blob = new Blob(chunks);
+      const arr = await blob.arrayBuffer();
+      let buf = await ctx.decodeAudioData(arr);
+      // Trim the sync offset off the start to line up with earlier tracks
+      const trim = Number(offsetInput.value) / 1000;
+      if (trim > 0 && trim < buf.duration) {
+        const start = Math.floor(trim * buf.sampleRate);
+        const out = ctx.createBuffer(buf.numberOfChannels, buf.length - start, buf.sampleRate);
+        for (let c = 0; c < buf.numberOfChannels; c++) {
+          out.copyToChannel(buf.getChannelData(c).subarray(start), c);
+        }
+        buf = out;
       }
-      buf = out;
+      tracks[i].buffer = buf;
+    } catch (e) {
+      say('Something went wrong with that take. Try recording it again.');
+      btn.textContent = tracks[i].buffer ? 'Re-record' : 'Record';
+      return;
     }
-    tracks[i].buffer = buf;
     tracks[i].nudge = 0;
     document.getElementById('nudge' + i).value = 0;
     document.getElementById('nudgeLabel' + i).textContent = 0;
     btn.textContent = 'Re-record';
-    btn.classList.add('rec');
     lastMixSaved = false;
-    say(NAMES[i] + ' recorded. Use its timing nudge if it sounds off.');
+    pausedPos = 0;
+    updateSeekUI(0);
+    say(NAMES[i] + ' recorded. Tap Play, then use its timing nudge while it plays.');
   };
-  startPlayback(i);
+  playFrom(0, i);
   recorder.start();
   btn.textContent = 'Stop';
   say('Recording ' + NAMES[i] + '...');
 }
-
-document.getElementById('playAll').onclick = () => startPlayback(tracks.length);
-document.getElementById('stopAll').onclick = stopPlayback;
 
 // ---------- Mixing ----------
 async function buildMixBlob() {
   const active = tracks.filter(t => t.buffer && !t.muted);
   if (!active.length) return null;
   const rate = ctx.sampleRate;
-  const len = Math.ceil(
-    Math.max(...active.map(t => t.buffer.length + Math.max(0, t.nudge / 1000) * rate))
-  );
+  const end = Math.max(...active.map(t => t.nudge / 1000 + t.buffer.duration));
+  const len = Math.max(1, Math.ceil(end * rate));
   const off = new OfflineAudioContext(1, len, rate);
   active.forEach(t => {
     const s = off.createBufferSource();
@@ -257,6 +413,7 @@ document.getElementById('saveBtn').onclick = async () => {
 };
 
 document.getElementById('newBtn').onclick = async () => {
+  if (isRecording) { say('Stop recording first.'); return; }
   const hasAudio = tracks.some(t => t.buffer);
   if (hasAudio && !lastMixSaved) {
     const save = confirm('You have audio that has not been saved. Tap OK to save it first, or Cancel to choose what to do next.');
@@ -267,17 +424,22 @@ document.getElementById('newBtn').onclick = async () => {
       return;
     }
   }
-  stopPlayback();
+  pausePlayback();
+  pausedPos = 0;
   tracks.forEach((t, i) => {
     t.buffer = null; t.gain = 1; t.muted = false; t.nudge = 0;
+    applyGain(i);
     document.getElementById('rec' + i).textContent = 'Record';
-    document.getElementById('mute' + i).textContent = 'Mute';
+    const m = document.getElementById('mute' + i);
+    m.textContent = 'Mute';
+    m.classList.remove('on');
     document.getElementById('vol' + i).value = 100;
     document.getElementById('nudge' + i).value = 0;
     document.getElementById('nudgeLabel' + i).textContent = 0;
   });
   document.getElementById('download').style.display = 'none';
   lastMixSaved = true;
+  updateSeekUI(0);
   say('New song ready. Tap Record on Lead to begin.');
 };
 
@@ -297,4 +459,4 @@ function toWav(buffer) {
     view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
   }
   return new Blob([view], { type: 'audio/wav' });
-                          } 
+  }
