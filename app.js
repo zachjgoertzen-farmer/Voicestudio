@@ -1,9 +1,10 @@
 const NAMES = ['Lead', 'Tenor', 'Voice 3', 'Voice 4'];
 const ctx = new (window.AudioContext || window.webkitAudioContext)();
-const tracks = NAMES.map(() => ({ buffer: null, gain: 1, muted: false }));
+const tracks = NAMES.map(() => ({ buffer: null, gain: 1, muted: false, nudge: 0 }));
 let playing = [];
 let recorder = null;
 let stream = null;
+let previewTimer = null;
 const statusEl = document.getElementById('status');
 
 function say(t) { statusEl.textContent = t; }
@@ -17,7 +18,15 @@ NAMES.forEach((name, i) => {
     <h3>${name}</h3>
     <button class="rec" id="rec${i}">Record</button>
     <button id="mute${i}">Mute</button>
-    <input type="range" id="vol${i}" min="0" max="150" value="100">`;
+    <label>Volume
+      <input type="range" id="vol${i}" min="0" max="150" value="100">
+    </label>
+    <label>Timing nudge: <span id="nudgeLabel${i}">0</span> ms
+      <input type="range" id="nudge${i}" min="-300" max="300" value="0">
+    </label>
+    <button id="nudgeMinus${i}">- 5 ms</button>
+    <button id="nudgePlus${i}">+ 5 ms</button>
+    <button id="nudgeZero${i}">Reset</button>`;
   container.appendChild(div);
   document.getElementById('rec' + i).onclick = () => toggleRecord(i);
   document.getElementById('mute' + i).onclick = (e) => {
@@ -27,6 +36,25 @@ NAMES.forEach((name, i) => {
   document.getElementById('vol' + i).oninput = (e) => {
     tracks[i].gain = e.target.value / 100;
   };
+
+  // Per-track timing nudge. Negative = play earlier, positive = play later.
+  const slider = document.getElementById('nudge' + i);
+  const label = document.getElementById('nudgeLabel' + i);
+  function setNudge(ms) {
+    ms = Math.max(-300, Math.min(300, ms));
+    tracks[i].nudge = ms;
+    slider.value = ms;
+    label.textContent = ms;
+    // After you stop moving it, replay everything so you can hear the change
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => {
+      if (!recorder || recorder.state !== 'recording') startPlayback(tracks.length);
+    }, 400);
+  }
+  slider.oninput = (e) => setNudge(Number(e.target.value));
+  document.getElementById('nudgeMinus' + i).onclick = () => setNudge(tracks[i].nudge - 5);
+  document.getElementById('nudgePlus' + i).onclick = () => setNudge(tracks[i].nudge + 5);
+  document.getElementById('nudgeZero' + i).onclick = () => setNudge(0);
 });
 
 const offsetInput = document.getElementById('offset');
@@ -34,9 +62,11 @@ offsetInput.oninput = () => {
   document.getElementById('offsetLabel').textContent = offsetInput.value;
 };
 
+// Start every track at a shared moment, shifted by its own nudge.
+// If a nudge is negative, the track starts partway into its audio instead.
 function startPlayback(upTo) {
   stopPlayback();
-  const when = ctx.currentTime + 0.1;
+  const when = ctx.currentTime + 0.15;
   for (let i = 0; i < upTo; i++) {
     const t = tracks[i];
     if (!t.buffer || t.muted) continue;
@@ -45,7 +75,12 @@ function startPlayback(upTo) {
     const g = ctx.createGain();
     g.gain.value = t.gain;
     src.connect(g).connect(ctx.destination);
-    src.start(when);
+    const shift = t.nudge / 1000;
+    if (shift >= 0) {
+      src.start(when + shift);
+    } else {
+      src.start(when, Math.min(-shift, t.buffer.duration - 0.001));
+    }
     playing.push(src);
   }
   return when;
@@ -91,9 +126,12 @@ async function toggleRecord(i) {
       buf = out;
     }
     tracks[i].buffer = buf;
+    tracks[i].nudge = 0;
+    document.getElementById('nudge' + i).value = 0;
+    document.getElementById('nudgeLabel' + i).textContent = 0;
     btn.textContent = 'Re-record';
     btn.classList.add('rec');
-    say(NAMES[i] + ' recorded.');
+    say(NAMES[i] + ' recorded. Use its timing nudge if it sounds off.');
   };
   startPlayback(i);
   recorder.start();
@@ -104,12 +142,15 @@ async function toggleRecord(i) {
 document.getElementById('playAll').onclick = () => startPlayback(tracks.length);
 document.getElementById('stopAll').onclick = stopPlayback;
 
-// Mix everything down to one WAV file
+// Mix everything down to one WAV file, using each track's nudge
 document.getElementById('mixBtn').onclick = async () => {
   const active = tracks.filter(t => t.buffer && !t.muted);
   if (!active.length) { say('Record something first.'); return; }
   const rate = ctx.sampleRate;
-  const len = Math.max(...active.map(t => t.buffer.length));
+  const maxShift = Math.max(0, ...active.map(t => t.nudge / 1000));
+  const len = Math.ceil(
+    Math.max(...active.map(t => t.buffer.length + Math.max(0, t.nudge / 1000) * rate))
+  );
   const off = new OfflineAudioContext(1, len, rate);
   active.forEach(t => {
     const s = off.createBufferSource();
@@ -117,7 +158,12 @@ document.getElementById('mixBtn').onclick = async () => {
     const g = off.createGain();
     g.gain.value = t.gain / Math.sqrt(active.length);
     s.connect(g).connect(off.destination);
-    s.start();
+    const shift = t.nudge / 1000;
+    if (shift >= 0) {
+      s.start(shift);
+    } else {
+      s.start(0, Math.min(-shift, t.buffer.duration - 0.001));
+    }
   });
   const rendered = await off.startRendering();
   const wav = toWav(rendered);
@@ -145,4 +191,4 @@ function toWav(buffer) {
     view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
   }
   return new Blob([view], { type: 'audio/wav' });
-}
+                                       }
