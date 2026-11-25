@@ -11,6 +11,19 @@
 <h1>Voice Studio</h1>
 <p class="hint">Use earbuds so playback stays out of the mic.</p>
 
+<div class="panel">
+  <label>Microphone
+    <select id="micSelect"></select>
+  </label>
+  <button id="micRefresh">Refresh mic list</button>
+  <label>Playback through
+    <select id="outSelect">
+      <option value="default">Default (earbuds if connected)</option>
+    </select>
+  </label>
+  <p class="hint">Tip: pick your earbuds in the mic list to use their mic. Bluetooth mics can sound thin, so record a short test and compare.</p>
+</div>
+
 <div id="tracks"></div>
 
 <div class="panel">
@@ -24,6 +37,12 @@
 </div>
 
 <p id="status"></p>
+
+<div class="bottombar">
+  <button id="saveBtn" class="primary">Save this song</button>
+  <button id="newBtn">Start new song</button>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>
