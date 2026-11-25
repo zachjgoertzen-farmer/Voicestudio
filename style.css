@@ -1,12 +1,22 @@
+body { background:#14141f; color:#eee; font-family:sans-serif; margin:0; padding:16px 16px 260px; }
+h1 { margin:0 0 4px; }
+.hint { color:#9aa; margin-top:0; font-size:14px; }
+.track { background:#222236; border-radius:12px; padding:12px; margin:12px 0; }
 .track h3 { margin:0 0 8px; }
 .track button, .panel button { padding:12px 16px; margin:4px 4px 4px 0; border:0; border-radius:8px; background:#3a3a5c; color:#fff; font-size:16px; }
 button.rec { background:#c0392b; }
 button.primary { background:#2e8b57; }
+button.on { background:#b9770e; }
 input[type=range] { width:100%; }
 select { width:100%; padding:10px; margin:4px 0 8px; border-radius:8px; background:#14141f; color:#eee; border:1px solid #3a3a5c; font-size:16px; }
 .panel { background:#222236; border-radius:12px; padding:12px; margin:12px 0; }
+.nudgerow { display:flex; flex-wrap:wrap; gap:6px; }
+.nudgerow button { flex:1; min-width:56px; margin:0; padding:10px 6px; }
+label small { color:#9aa; }
 #download { display:block; margin-top:12px; color:#7fd; font-size:18px; }
 #status { color:#fc6; min-height:24px; }
-.bottombar { position:fixed; left:0; right:0; bottom:0; display:flex; gap:8px; padding:10px 16px; background:#0e0e18; border-top:1px solid #3a3a5c; }
-.bottombar button { flex:1; padding:16px; border:0; border-radius:10px; background:#3a3a5c; color:#fff; font-size:17px; }
-.bottombar button.primary { background:#2e8b57; }
+.bottombar { position:fixed; left:0; right:0; bottom:0; display:flex; flex-direction:column; gap:8px; padding:10px 16px; background:#0e0e18; border-top:1px solid #3a3a5c; }
+.player .times { display:flex; justify-content:space-between; font-size:13px; color:#9aa; }
+.row { display:flex; gap:8px; margin-top:6px; }
+.row button { flex:1; padding:14px; border:0; border-radius:10px; background:#3a3a5c; color:#fff; font-size:17px; }
+.row button.primary { background:#2e8b57; }
