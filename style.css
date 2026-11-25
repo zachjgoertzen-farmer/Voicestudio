@@ -1,0 +1,12 @@
+body { background:#14141f; color:#eee; font-family:sans-serif; margin:0; padding:16px; }
+h1 { margin:0 0 4px; }
+.hint { color:#9aa; margin-top:0; }
+.track { background:#222236; border-radius:12px; padding:12px; margin:12px 0; }
+.track h3 { margin:0 0 8px; }
+.track button, .panel button { padding:12px 16px; margin:4px 4px 4px 0; border:0; border-radius:8px; background:#3a3a5c; color:#fff; font-size:16px; }
+button.rec { background:#c0392b; }
+button.primary { background:#2e8b57; }
+input[type=range] { width:100%; }
+.panel { background:#222236; border-radius:12px; padding:12px; }
+#download { display:block; margin-top:12px; color:#7fd; font-size:18px; }
+#status { color:#fc6; min-height:24px; }
