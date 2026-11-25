@@ -5,11 +5,59 @@ let playing = [];
 let recorder = null;
 let stream = null;
 let previewTimer = null;
+let lastMixSaved = true;
 const statusEl = document.getElementById('status');
+const micSelect = document.getElementById('micSelect');
+const outSelect = document.getElementById('outSelect');
 
 function say(t) { statusEl.textContent = t; }
 
-// Build the track UI
+// ---------- Microphone and output pickers ----------
+async function loadDevices() {
+  try {
+    // A quick permission request is needed before device names show up
+    const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+    tmp.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    say('Allow microphone access to see your mics.');
+  }
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const prevMic = micSelect.value;
+  micSelect.innerHTML = '';
+  devices.filter(d => d.kind === 'audioinput').forEach((d, n) => {
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = d.label || ('Microphone ' + (n + 1));
+    micSelect.appendChild(o);
+  });
+  if (prevMic) micSelect.value = prevMic;
+
+  // Output choice only works in browsers that support it (Chrome on Android does)
+  const prevOut = outSelect.value;
+  outSelect.innerHTML = '<option value="default">Default (earbuds if connected)</option>';
+  devices.filter(d => d.kind === 'audiooutput').forEach((d, n) => {
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = d.label || ('Speaker ' + (n + 1));
+    outSelect.appendChild(o);
+  });
+  if (prevOut) outSelect.value = prevOut;
+}
+document.getElementById('micRefresh').onclick = loadDevices;
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', loadDevices);
+}
+loadDevices();
+
+async function applyOutput() {
+  if (ctx.setSinkId && outSelect.value) {
+    try { await ctx.setSinkId(outSelect.value === 'default' ? '' : outSelect.value); }
+    catch (e) { /* not supported here, playback just uses the default */ }
+  }
+}
+outSelect.onchange = applyOutput;
+
+// ---------- Build the track UI ----------
 const container = document.getElementById('tracks');
 NAMES.forEach((name, i) => {
   const div = document.createElement('div');
@@ -45,7 +93,7 @@ NAMES.forEach((name, i) => {
     tracks[i].nudge = ms;
     slider.value = ms;
     label.textContent = ms;
-    // After you stop moving it, replay everything so you can hear the change
+    lastMixSaved = false;
     clearTimeout(previewTimer);
     previewTimer = setTimeout(() => {
       if (!recorder || recorder.state !== 'recording') startPlayback(tracks.length);
@@ -62,8 +110,7 @@ offsetInput.oninput = () => {
   document.getElementById('offsetLabel').textContent = offsetInput.value;
 };
 
-// Start every track at a shared moment, shifted by its own nudge.
-// If a nudge is negative, the track starts partway into its audio instead.
+// ---------- Playback ----------
 function startPlayback(upTo) {
   stopPlayback();
   const when = ctx.currentTime + 0.15;
@@ -91,6 +138,7 @@ function stopPlayback() {
   playing = [];
 }
 
+// ---------- Recording ----------
 async function toggleRecord(i) {
   const btn = document.getElementById('rec' + i);
   if (recorder && recorder.state === 'recording') {
@@ -98,12 +146,13 @@ async function toggleRecord(i) {
     return;
   }
   await ctx.resume();
+  await applyOutput();
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-    });
+    const audio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+    if (micSelect.value) audio.deviceId = { exact: micSelect.value };
+    stream = await navigator.mediaDevices.getUserMedia({ audio });
   } catch (e) {
-    say('Microphone permission denied.');
+    say('Could not open that microphone. Try another one from the list.');
     return;
   }
   const chunks = [];
@@ -131,6 +180,7 @@ async function toggleRecord(i) {
     document.getElementById('nudgeLabel' + i).textContent = 0;
     btn.textContent = 'Re-record';
     btn.classList.add('rec');
+    lastMixSaved = false;
     say(NAMES[i] + ' recorded. Use its timing nudge if it sounds off.');
   };
   startPlayback(i);
@@ -142,12 +192,11 @@ async function toggleRecord(i) {
 document.getElementById('playAll').onclick = () => startPlayback(tracks.length);
 document.getElementById('stopAll').onclick = stopPlayback;
 
-// Mix everything down to one WAV file, using each track's nudge
-document.getElementById('mixBtn').onclick = async () => {
+// ---------- Mixing ----------
+async function buildMixBlob() {
   const active = tracks.filter(t => t.buffer && !t.muted);
-  if (!active.length) { say('Record something first.'); return; }
+  if (!active.length) return null;
   const rate = ctx.sampleRate;
-  const maxShift = Math.max(0, ...active.map(t => t.nudge / 1000));
   const len = Math.ceil(
     Math.max(...active.map(t => t.buffer.length + Math.max(0, t.nudge / 1000) * rate))
   );
@@ -166,13 +215,70 @@ document.getElementById('mixBtn').onclick = async () => {
     }
   });
   const rendered = await off.startRendering();
-  const wav = toWav(rendered);
+  return toWav(rendered);
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+document.getElementById('mixBtn').onclick = async () => {
+  const wav = await buildMixBlob();
+  if (!wav) { say('Record something first.'); return; }
   const link = document.getElementById('download');
   link.href = URL.createObjectURL(wav);
   link.download = 'my-mix.wav';
   link.textContent = 'Download my-mix.wav';
   link.style.display = 'block';
   say('Mix ready.');
+};
+
+// ---------- Save and start new ----------
+function stamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+         '_' + p(d.getHours()) + p(d.getMinutes());
+}
+
+document.getElementById('saveBtn').onclick = async () => {
+  const wav = await buildMixBlob();
+  if (!wav) { say('Nothing to save yet. Record something first.'); return; }
+  downloadBlob(wav, 'song-' + stamp() + '.wav');
+  lastMixSaved = true;
+  say('Saved to your Downloads folder.');
+};
+
+document.getElementById('newBtn').onclick = async () => {
+  const hasAudio = tracks.some(t => t.buffer);
+  if (hasAudio && !lastMixSaved) {
+    const save = confirm('You have audio that has not been saved. Tap OK to save it first, or Cancel to choose what to do next.');
+    if (save) {
+      const wav = await buildMixBlob();
+      if (wav) { downloadBlob(wav, 'song-' + stamp() + '.wav'); lastMixSaved = true; }
+    } else if (!confirm('Start a new song WITHOUT saving? The current tracks will be erased.')) {
+      return;
+    }
+  }
+  stopPlayback();
+  tracks.forEach((t, i) => {
+    t.buffer = null; t.gain = 1; t.muted = false; t.nudge = 0;
+    document.getElementById('rec' + i).textContent = 'Record';
+    document.getElementById('mute' + i).textContent = 'Mute';
+    document.getElementById('vol' + i).value = 100;
+    document.getElementById('nudge' + i).value = 0;
+    document.getElementById('nudgeLabel' + i).textContent = 0;
+  });
+  document.getElementById('download').style.display = 'none';
+  lastMixSaved = true;
+  say('New song ready. Tap Record on Lead to begin.');
 };
 
 function toWav(buffer) {
@@ -191,4 +297,4 @@ function toWav(buffer) {
     view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
   }
   return new Blob([view], { type: 'audio/wav' });
-                                       }
+                          } 
